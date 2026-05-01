@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Loader2, ShieldAlert, CheckCircle, AlertTriangle, ExternalLink, Flag } from 'lucide-react';
+import { Search, Loader2, ShieldAlert, CheckCircle, AlertTriangle, ExternalLink, Flag, Image as ImageIcon, X } from 'lucide-react';
 import axios from 'axios';
 import { supabase } from '../supabaseClient';
 
@@ -12,13 +12,62 @@ const VerifyNews = () => {
     const [error, setError] = useState("");
     const [reportStatus, setReportStatus] = useState("");
 
+    // Image state
+    const [pastedImage, setPastedImage] = useState(null);      // base64 data URL
+    const [imageMode, setImageMode] = useState(false);          // whether we are verifying an image
+
+    // ── Handle Ctrl+V paste on the image drop zone ──────────────────────────
+    const handlePaste = useCallback((e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (const item of items) {
+            if (item.type.startsWith('image/')) {
+                e.preventDefault();
+                const file = item.getAsFile();
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    setPastedImage(ev.target.result);   // full data URL  e.g. "data:image/png;base64,..."
+                    setImageMode(true);
+                    setNewsText("");
+                    setResult(null);
+                    setError("");
+                };
+                reader.readAsDataURL(file);
+                break;
+            }
+        }
+    }, []);
+
+    // ── Handle file drop ─────────────────────────────────────────────────────
+    const handleDrop = useCallback((e) => {
+        e.preventDefault();
+        const file = e.dataTransfer.files[0];
+        if (!file || !file.type.startsWith('image/')) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            setPastedImage(ev.target.result);
+            setImageMode(true);
+            setNewsText("");
+            setResult(null);
+            setError("");
+        };
+        reader.readAsDataURL(file);
+    }, []);
+
+    const clearImage = () => {
+        setPastedImage(null);
+        setImageMode(false);
+        setResult(null);
+        setError("");
+    };
+
     const handleReportFake = async () => {
-        if (!newsText.trim()) return;
+        if (!newsText.trim() && !pastedImage) return;
         setReportStatus("Reporting...");
         try {
             const { error } = await supabase
                 .from('reported_fake')
-                .insert([{ news_text: newsText }]);
+                .insert([{ news_text: newsText || "[Image submission]" }]);
             if (error) throw error;
             setReportStatus("Reported successfully!");
             setTimeout(() => setReportStatus(""), 3000);
@@ -30,23 +79,35 @@ const VerifyNews = () => {
 
     const handleVerify = async (e) => {
         e.preventDefault();
-        if (!newsText.trim()) return;
-        
+        if (!newsText.trim() && !pastedImage) return;
+
         setLoading(true);
         setError("");
         setResult(null);
 
         try {
-            const { data } = await axios.post("http://localhost:5000/api/verify-news", { newsText });
+            let data;
+            if (imageMode && pastedImage) {
+                // Strip the "data:image/...;base64," prefix to get raw base64
+                const base64 = pastedImage.split(',')[1];
+                const mimeType = pastedImage.split(';')[0].split(':')[1];  // e.g. "image/png"
+                const response = await axios.post(`http://localhost:5000/api/verify-image`, {
+                    imageBase64: base64,
+                    mimeType,
+                });
+                data = response.data;
+            } else {
+                const response = await axios.post(`http://localhost:5000/api/verify-news`, { newsText });
+                data = response.data;
+            }
             setResult(data);
         } catch (err) {
             console.error("Verification failed", err);
             setError("Failed to verify. Please ensure the backend is running and API keys are set.");
-            // Mock Fallback for UI demonstration if backend fails
             setResult({
                 status: "UNVERIFIED",
-                confidence: 45,
-                explanation: "Could not connect to AI Verification server. Please try again later.",
+                confidence: 0,
+                explanation: "Could not connect to the AI Verification server. Please try again later.",
                 sources: []
             });
         } finally {
@@ -55,38 +116,114 @@ const VerifyNews = () => {
     };
 
     const getStatusColor = (status) => {
-        if (status === "TRUE") return { bg: "bg-green-100 dark:bg-green-500/10", text: "text-green-600", border: "border-green-200 dark:border-green-800", icon: CheckCircle };
-        if (status === "FALSE") return { bg: "bg-red-100 dark:bg-red-500/10", text: "text-red-600", border: "border-red-200 dark:border-red-800", icon: ShieldAlert };
-        return { bg: "bg-yellow-100 dark:bg-yellow-500/10", text: "text-yellow-600", border: "border-yellow-200 dark:border-yellow-800", icon: AlertTriangle };
+        if (status === "TRUE")  return { bg: "bg-green-100 dark:bg-green-500/10",  text: "text-green-600",  border: "border-green-200 dark:border-green-800",  icon: CheckCircle };
+        if (status === "FALSE") return { bg: "bg-red-100 dark:bg-red-500/10",    text: "text-red-600",    border: "border-red-200 dark:border-red-800",    icon: ShieldAlert };
+        return                         { bg: "bg-yellow-100 dark:bg-yellow-500/10", text: "text-yellow-600", border: "border-yellow-200 dark:border-yellow-800", icon: AlertTriangle };
     };
+
+    const canVerify = newsText.trim() || pastedImage;
 
     return (
         <div className="space-y-6 max-w-3xl mx-auto">
             <div className="text-center mb-8">
                 <h2 className="text-3xl font-extrabold text-slate-800 dark:text-white mb-2 tracking-tight">AI Fact Checker</h2>
-                <p className="text-slate-500 dark:text-slate-400">Paste any breaking news, WhatsApp forward, or alert warning to verify its authenticity.</p>
+                <p className="text-slate-500 dark:text-slate-400">
+                    Paste any breaking news, WhatsApp forward, alert warning, or a <strong>screenshot</strong> to verify its authenticity.
+                </p>
             </div>
 
-            {/* Input Section */}
-            <form onSubmit={handleVerify} className="relative group">
-                <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <Search className="h-5 w-5 text-gray-400 group-focus-within:text-primary transition-colors" />
-                </div>
-                <input
-                    type="text"
-                    value={newsText}
-                    onChange={(e) => setNewsText(e.target.value)}
-                    className="block w-full pl-11 pr-32 py-5 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl text-slate-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-primary/20 focus:border-primary transition-all shadow-sm text-lg"
-                    placeholder={t('verify_placeholder')}
-                />
-                <button
-                    type="submit"
-                    disabled={loading || !newsText.trim()}
-                    className="absolute inset-y-2 right-2 flex items-center px-6 bg-primary hover:bg-primary-dark text-white rounded-xl font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+            {/* ── Image drop/paste zone ── */}
+            {!imageMode ? (
+                <div
+                    onPaste={handlePaste}
+                    onDrop={handleDrop}
+                    onDragOver={(e) => e.preventDefault()}
+                    className="flex flex-col items-center justify-center gap-2 py-5 px-4 border-2 border-dashed border-gray-300 dark:border-slate-600 rounded-2xl cursor-pointer bg-gray-50 dark:bg-slate-800/40 hover:border-primary hover:bg-primary/5 transition-all group"
                 >
-                    {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : t('verify')}
+                    <ImageIcon className="w-7 h-7 text-gray-400 group-hover:text-primary transition-colors" />
+                    <p className="text-sm text-gray-500 dark:text-slate-400 group-hover:text-primary transition-colors text-center">
+                        <span className="font-semibold">Paste a screenshot</span> here (Ctrl+V) or drag &amp; drop an image
+                    </p>
+                    <label className="cursor-pointer mt-1 text-xs text-primary font-medium underline underline-offset-2">
+                        or click to upload an image
+                        <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                                const file = e.target.files[0];
+                                if (!file) return;
+                                const reader = new FileReader();
+                                reader.onload = (ev) => {
+                                    setPastedImage(ev.target.result);
+                                    setImageMode(true);
+                                    setNewsText("");
+                                    setResult(null);
+                                    setError("");
+                                };
+                                reader.readAsDataURL(file);
+                            }}
+                        />
+                    </label>
+                </div>
+            ) : (
+                <div className="relative rounded-2xl overflow-hidden border border-primary/40 shadow-lg">
+                    <img src={pastedImage} alt="Pasted screenshot" className="w-full max-h-64 object-contain bg-black/5" />
+                    <button
+                        onClick={clearImage}
+                        className="absolute top-2 right-2 p-1.5 rounded-full bg-white/90 dark:bg-slate-800 shadow text-slate-700 dark:text-slate-200 hover:bg-red-100 dark:hover:bg-red-900/40 hover:text-red-500 transition-colors"
+                        title="Remove image"
+                    >
+                        <X className="w-4 h-4" />
+                    </button>
+                    <div className="absolute bottom-0 left-0 right-0 py-2 px-4 bg-black/50 backdrop-blur-sm text-white text-xs font-medium flex items-center gap-2">
+                        <ImageIcon className="w-3.5 h-3.5" /> Screenshot ready — click Verify to analyse
+                    </div>
+                </div>
+            )}
+
+            {/* ── Divider ── */}
+            {!imageMode && (
+                <div className="flex items-center gap-3">
+                    <div className="flex-1 h-px bg-gray-200 dark:bg-slate-700" />
+                    <span className="text-xs text-gray-400 dark:text-slate-500 font-medium">OR type / paste text</span>
+                    <div className="flex-1 h-px bg-gray-200 dark:bg-slate-700" />
+                </div>
+            )}
+
+            {/* ── Text Input Section (hidden in image mode) ── */}
+            {!imageMode && (
+                <form onSubmit={handleVerify} className="relative group">
+                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <Search className="h-5 w-5 text-gray-400 group-focus-within:text-primary transition-colors" />
+                    </div>
+                    <input
+                        type="text"
+                        value={newsText}
+                        onChange={(e) => setNewsText(e.target.value)}
+                        className="block w-full pl-11 pr-32 py-5 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl text-slate-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-primary/20 focus:border-primary transition-all shadow-sm text-lg"
+                        placeholder={t('verify_placeholder')}
+                    />
+                    <button
+                        type="submit"
+                        disabled={loading || !canVerify}
+                        className="absolute inset-y-2 right-2 flex items-center px-6 bg-primary hover:bg-primary-dark text-white rounded-xl font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+                    >
+                        {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : t('verify')}
+                    </button>
+                </form>
+            )}
+
+            {/* ── Verify button shown in image mode ── */}
+            {imageMode && (
+                <button
+                    onClick={handleVerify}
+                    disabled={loading}
+                    className="w-full py-4 bg-primary hover:bg-primary-dark text-white rounded-2xl font-bold text-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md flex items-center justify-center gap-2"
+                >
+                    {loading ? <><Loader2 className="w-5 h-5 animate-spin" /> Analysing Image...</> : <><ImageIcon className="w-5 h-5" /> Verify Screenshot</>}
                 </button>
-            </form>
+            )}
 
             {error && (
                 <div className="p-4 rounded-xl bg-red-50 dark:bg-red-500/10 text-red-600 text-sm border border-red-100 dark:border-red-800">
@@ -94,25 +231,25 @@ const VerifyNews = () => {
                 </div>
             )}
 
-            {/* Quick Report Actions */}
+            {/* ── Quick Report Actions ── */}
             <div className="flex justify-end pr-2 gap-2">
                 <button
                     type="button"
                     onClick={handleReportFake}
-                    className="text-sm font-medium flex items-center gap-1 text-slate-500 hover:text-red-500 transition-colors"
+                    disabled={!canVerify}
+                    className="text-sm font-medium flex items-center gap-1 text-slate-500 hover:text-red-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                    <Flag className="w-4 h-4" /> 
+                    <Flag className="w-4 h-4" />
                     {reportStatus || t('report_fake')}
                 </button>
             </div>
 
-            {/* Result Card */}
+            {/* ── Result Card ── */}
             {result && (
                 <div className="animate-slide-up">
                     <div className={`p-6 sm:p-8 rounded-3xl border shadow-xl transition-all ${getStatusColor(result.status).bg} ${getStatusColor(result.status).border} relative overflow-hidden`}>
-                        {/* Decorative background circle */}
                         <div className={`absolute -right-16 -top-16 w-64 h-64 rounded-full blur-3xl opacity-20 bg-current ${getStatusColor(result.status).text}`}></div>
-                        
+
                         <div className="relative z-10">
                             <div className="flex items-center gap-4 mb-6">
                                 {React.createElement(getStatusColor(result.status).icon, { className: `w-10 h-10 sm:w-14 sm:h-14 ${getStatusColor(result.status).text}` })}
@@ -122,11 +259,11 @@ const VerifyNews = () => {
                                     </h3>
                                     <div className="flex items-center gap-2 mt-2">
                                         <div className="text-sm font-semibold text-slate-600 dark:text-slate-300">
-                                            {t('confidence')}: 
+                                            {t('confidence')}:
                                         </div>
                                         <div className="w-32 h-2.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                                            <div 
-                                                className={`h-full rounded-full ${getStatusColor(result.status).text.replace('text-', 'bg-')}`} 
+                                            <div
+                                                className={`h-full rounded-full ${getStatusColor(result.status).text.replace('text-', 'bg-')}`}
                                                 style={{ width: `${result.confidence}%` }}
                                             ></div>
                                         </div>
@@ -162,7 +299,7 @@ const VerifyNews = () => {
                                     </div>
                                 </div>
                             )}
-                            
+
                             {result.status === "TRUE" && (
                                 <div className="mt-6 p-4 bg-blue-600 text-white rounded-xl shadow-lg border border-blue-500 flex items-start gap-3">
                                     <ShieldAlert className="w-6 h-6 shrink-0" />
